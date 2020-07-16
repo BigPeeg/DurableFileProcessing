@@ -1,11 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace DurableFileProcessing
+﻿namespace DurableFileProcessing
 {
     public enum ProcessingOutcome
     {
-        New, Rebuilt, Unmanaged, Failed, Error 
+        Unknown, Rebuilt, Unmanaged, Failed, Error
     }
 }

@@ -29,8 +29,25 @@ namespace DurableFileProcessing
             var hash = await context.CallActivityAsync<string>("FileProcessing_HashGenerator", (containerSas, filename));
             await context.CallActivityAsync("FileProcessing_StoreHash", (transactionId, hash));
 
-            var outcome = await context.CallActivityAsync<ProcessingOutcome>("FileProcessing_CheckAvailableOutcome", hash);
+            var filetype = await context.CallActivityAsync<string>("FileProcessing_GetFileType", (containerSas, filename));
 
+            if (filetype == "unmanaged")
+            {
+                await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, ProcessingOutcome.Unknown));
+            }
+            else
+            {
+                var rebuildOutcome = await context.CallActivityAsync<ProcessingOutcome>("FileProcessing_RebuildFile", (containerSas, hash, filetype));
+
+                if (rebuildOutcome == ProcessingOutcome.Rebuilt)
+                {
+                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, rebuildOutcome));
+                }
+                else
+                {
+                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, rebuildOutcome));
+                }
+            }
         }
 
         [FunctionName("FileProcessing_HashGenerator")]
@@ -64,10 +81,35 @@ namespace DurableFileProcessing
         public static ProcessingOutcome CheckAvailableOutcome([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
             string hash = context.GetInput<string>();
-            var outcome = ProcessingOutcome.New;
+            var outcome = ProcessingOutcome.Unknown;
             log.LogInformation($"CheckAvailableOutcome, hash='{hash}', Outcome = {outcome}");
             return outcome;
         }
+
+        [FunctionName("FileProcessing_SignalTransactionOutcome")]
+        public static void SignalTransactionOutcome([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        {
+            (string transactionId, ProcessingOutcome outcome) = context.GetInput<(string, ProcessingOutcome)>();
+            log.LogInformation($"SignalTransactionOutcome, transactionId='{transactionId}', outcome='{outcome}'");
+        }
+        
+        [FunctionName("FileProcessing_GetFileType")]
+        public static string GetFileType([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        {
+            (string containerSas, string filename) = context.GetInput<(string, string)>();
+            log.LogInformation($"GetFileType, containerSas='{containerSas}', filename='{filename}'");
+            return "unknown";
+        }
+
+        
+        [FunctionName("FileProcessing_RebuildFile")]
+        public static ProcessingOutcome RebuildFile([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        {
+            (string rebuiltContainerSas, string filename, string filetype) = context.GetInput<(string, string, string)>();
+            log.LogInformation($"GetFileType, containerSas='{rebuiltContainerSas}', filename='{filename}', filetype='{filetype}'");
+            return ProcessingOutcome.Failed; // When we rebuild the new content will be referenced by supplied SAS
+        }
+
 
         [FunctionName("FileProcessing_BlobTrigger")]
         public static async Task BlobTrigger(
