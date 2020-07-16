@@ -11,8 +11,13 @@ namespace DurableFileProcessing
     {
         [FunctionName("FileProcessing")]
         public static async Task<List<string>> RunOrchestrator(
-            [OrchestrationTrigger] IDurableOrchestrationContext context)
+            [OrchestrationTrigger] IDurableOrchestrationContext context,
+            [Blob("functionstest")] CloudBlobContainer container,
+            ILogger log)
         {
+            var filename = context.GetInput<string>();
+            log.LogInformation($"FileProcessing {container.Uri}, name='{filename}'");
+
             var outputs = new List<string>();
 
             // Replace "hello" with the name of your Durable Activity Function.
@@ -36,7 +41,7 @@ namespace DurableFileProcessing
             [BlobTrigger("functionstest/{name}")] CloudBlockBlob myBlob, string name,
             [DurableClient] IDurableOrchestrationClient starter, ILogger log)
         {
-            string instanceId = await starter.StartNewAsync("FileProcessing", null);
+            string instanceId = await starter.StartNewAsync("FileProcessing", input:name);
 
             log.LogInformation($"Started orchestration with ID = '{instanceId}', Blob '{name}'.");
         }
