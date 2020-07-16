@@ -14,45 +14,23 @@ namespace DurableFileProcessing
     public static class FileProcessing
     {
         [FunctionName("FileProcessing")]
-        public static async Task<List<string>> RunOrchestrator(
+        public static async Task RunOrchestrator(
             [OrchestrationTrigger] IDurableOrchestrationContext context,
             [Blob("functionstest")] CloudBlobContainer container,
             ILogger log)
         {
+            var transactionId = context.NewGuid().ToString();
             var filename = context.GetInput<string>();
 
-            string containerSas = GetSharedAccessSignature(container, context.CurrentUtcDateTime.AddHours(24));
+            string containerSas = BlobUtilities.GetSharedAccessSignature(container, context.CurrentUtcDateTime.AddHours(24));
 
             log.LogInformation($"FileProcessing SAS Token: {containerSas}");
 
             var hash = await context.CallActivityAsync<string>("FileProcessing_HashGenerator", (containerSas, filename));
+            await context.CallActivityAsync("FileProcessing_StoreHash", (transactionId, hash));
 
-            log.LogInformation($"FileProcessing {container.Uri}, name='{filename}', hash='{hash}'");
+            var outcome = await context.CallActivityAsync<ProcessingOutcome>("FileProcessing_CheckAvailableOutcome", hash);
 
-            var outputs = new List<string>();
-
-            // Replace "hello" with the name of your Durable Activity Function.
-            outputs.Add(await context.CallActivityAsync<string>("FileProcessing_Hello", "Tokyo"));
-            outputs.Add(await context.CallActivityAsync<string>("FileProcessing_Hello", "Seattle"));
-            outputs.Add(await context.CallActivityAsync<string>("FileProcessing_Hello", "London"));
-
-            // returns ["Hello Tokyo!", "Hello Seattle!", "Hello London!"]
-            return outputs;
-        }
-
-        private static string GetSharedAccessSignature(CloudBlobContainer container, DateTimeOffset expiryTime)
-        {
-            SharedAccessBlobPolicy adHocPolicy = new SharedAccessBlobPolicy()
-            {
-                // When the start time for the SAS is omitted, the start time is assumed to be the time when the storage service receives the request.
-                // Omitting the start time for a SAS that is effective immediately helps to avoid clock skew.
-                SharedAccessExpiryTime = expiryTime,
-                Permissions = SharedAccessBlobPermissions.Read 
-            };
-
-            var sasContainerToken = container.GetSharedAccessSignature(adHocPolicy);
-
-            return container.Uri + sasContainerToken;
         }
 
         [FunctionName("FileProcessing_HashGenerator")]
@@ -75,11 +53,20 @@ namespace DurableFileProcessing
             }
         }
 
-        [FunctionName("FileProcessing_Hello")]
-        public static string SayHello([ActivityTrigger] string name, ILogger log)
+        [FunctionName("FileProcessing_StoreHash")]
+        public static void StoreHash([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
-            log.LogInformation($"Saying hello to {name}.");
-            return $"Hello {name}!";
+            (string transactionId, string hash) = context.GetInput<(string, string)>();
+            log.LogInformation($"StoreHash, transactionId='{transactionId}', hash='{hash}'");
+        }
+
+        [FunctionName("FileProcessing_CheckAvailableOutcome")]
+        public static ProcessingOutcome CheckAvailableOutcome([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        {
+            string hash = context.GetInput<string>();
+            var outcome = ProcessingOutcome.New;
+            log.LogInformation($"CheckAvailableOutcome, hash='{hash}', Outcome = {outcome}");
+            return outcome;
         }
 
         [FunctionName("FileProcessing_BlobTrigger")]
