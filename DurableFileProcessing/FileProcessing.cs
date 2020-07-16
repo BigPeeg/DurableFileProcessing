@@ -1,4 +1,8 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Security.Cryptography;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Azure.Storage.Blob;
 using Microsoft.Azure.WebJobs;
@@ -16,7 +20,14 @@ namespace DurableFileProcessing
             ILogger log)
         {
             var filename = context.GetInput<string>();
-            log.LogInformation($"FileProcessing {container.Uri}, name='{filename}'");
+
+            string containerSas = GetSharedAccessSignature(container, context.CurrentUtcDateTime.AddHours(24));
+
+            log.LogInformation($"FileProcessing SAS Token: {containerSas}");
+
+            var hash = await context.CallActivityAsync<string>("FileProcessing_HashGenerator", (containerSas, filename));
+
+            log.LogInformation($"FileProcessing {container.Uri}, name='{filename}', hash='{hash}'");
 
             var outputs = new List<string>();
 
@@ -27,6 +38,41 @@ namespace DurableFileProcessing
 
             // returns ["Hello Tokyo!", "Hello Seattle!", "Hello London!"]
             return outputs;
+        }
+
+        private static string GetSharedAccessSignature(CloudBlobContainer container, DateTimeOffset expiryTime)
+        {
+            SharedAccessBlobPolicy adHocPolicy = new SharedAccessBlobPolicy()
+            {
+                // When the start time for the SAS is omitted, the start time is assumed to be the time when the storage service receives the request.
+                // Omitting the start time for a SAS that is effective immediately helps to avoid clock skew.
+                SharedAccessExpiryTime = expiryTime,
+                Permissions = SharedAccessBlobPermissions.Read 
+            };
+
+            var sasContainerToken = container.GetSharedAccessSignature(adHocPolicy);
+
+            return container.Uri + sasContainerToken;
+        }
+
+        [FunctionName("FileProcessing_HashGenerator")]
+        public static async Task<string> HashGeneratorAsync([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        {
+            (string containerSas, string filename) = context.GetInput<(string, string)>();
+
+            log.LogInformation($"HashGenerator {containerSas}");
+            var cloudBlobContainer = new CloudBlobContainer(new Uri(containerSas));
+            var blobReference = cloudBlobContainer.GetBlockBlobReference(filename);
+
+            using (var fileStream = new MemoryStream())
+            using (var md5 = MD5.Create())
+            {
+                await blobReference.DownloadToStreamAsync(fileStream, CancellationToken.None);
+
+                var hash = md5.ComputeHash(fileStream);
+                var base64String = Convert.ToBase64String(hash);
+                return base64String;
+            }
         }
 
         [FunctionName("FileProcessing_Hello")]
