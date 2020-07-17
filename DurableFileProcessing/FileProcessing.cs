@@ -1,3 +1,4 @@
+using Microsoft.Azure.Storage.Auth;
 using Microsoft.Azure.Storage.Blob;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.DurableTask;
@@ -35,14 +36,18 @@ namespace DurableFileProcessing
             else
             {
                 log.LogInformation($"FileProcessing {filetype}");
-                // Specify the hash value as the rebuilt filename
+
+                var (storageAccount, storageAccountKey, rebuildStoreLocaton) = await context.CallActivityAsync<(string, string, string)>("FileProcessing_GetRebuildStoreLocation", null);
+                var rebuildContainer = new CloudBlobContainer(new Uri(rebuildStoreLocaton), new StorageCredentials(storageAccount, storageAccountKey));
                 var sourceSas = BlobUtilities.GetSharedAccessSignature(container, blobName, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read);
-                var rebuiltWritesSas = BlobUtilities.GetSharedAccessSignature(container, hash, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read | SharedAccessBlobPermissions.Write);
+
+                // Specify the hash value as the rebuilt filename
+                var rebuiltWritesSas = BlobUtilities.GetSharedAccessSignature(rebuildContainer, hash, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read | SharedAccessBlobPermissions.Write);
                 var rebuildOutcome = await context.CallActivityAsync<ProcessingOutcome>("FileProcessing_RebuildFile", (sourceSas, rebuiltWritesSas, filetype));
 
                 if (rebuildOutcome == ProcessingOutcome.Rebuilt)
                 {
-                    var rebuiltReadSas = BlobUtilities.GetSharedAccessSignature(container, hash, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read);
+                    var rebuiltReadSas = BlobUtilities.GetSharedAccessSignature(rebuildContainer, hash, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read);
                     log.LogInformation($"FileProcessing Rebuild {rebuiltReadSas}");
 
                     await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Rebuilt, RebuiltFileSas = rebuiltReadSas }));
@@ -53,6 +58,15 @@ namespace DurableFileProcessing
                     await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Failed, RebuiltFileSas = String.Empty }));
                 }
             }
+        }
+
+        [FunctionName("FileProcessing_GetRebuildStoreLocation")]
+        public static Task<(string, string, string)> GetRebuildStoreLocation([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        {
+            var storageAccount = Environment.GetEnvironmentVariable("StorageAccount", EnvironmentVariableTarget.Process);
+            var storageAccountKey = Environment.GetEnvironmentVariable("StorageAccountKey", EnvironmentVariableTarget.Process);
+            var rebuildStoreLocaton = Environment.GetEnvironmentVariable("RebuildStoreLocaton", EnvironmentVariableTarget.Process);
+            return Task.FromResult((storageAccount, storageAccountKey, rebuildStoreLocaton));
         }
 
         [FunctionName("FileProcessing_HashGenerator")]
@@ -111,7 +125,9 @@ namespace DurableFileProcessing
             var rxBlockBlob = new CloudBlockBlob(new Uri(receivedSas));
             var rdBlobClient = new CloudBlockBlob(new Uri(rebuildSas));
 
-            await rdBlobClient.StartCopyAsync(rxBlockBlob);
+            var RebuildFileAsync = await rdBlobClient.StartCopyAsync(rxBlockBlob);
+            log.LogInformation($"RebuildFileAsync: '{RebuildFileAsync}");
+
             return ProcessingOutcome.Rebuilt;
         }
 
