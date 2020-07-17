@@ -16,7 +16,7 @@ namespace DurableFileProcessing
         [FunctionName("FileProcessing")]
         public static async Task RunOrchestrator(
             [OrchestrationTrigger] IDurableOrchestrationContext context,
-            [Blob("functionstest")] CloudBlobContainer container,
+            [Blob("original-store")] CloudBlobContainer container,
             ILogger log)
         {
             var transactionId = context.NewGuid().ToString();
@@ -113,7 +113,7 @@ namespace DurableFileProcessing
 
         [FunctionName("FileProcessing_BlobTrigger")]
         public static async Task BlobTrigger(
-            [BlobTrigger("functionstest/{name}")] CloudBlockBlob myBlob, string name,
+            [BlobTrigger("original-store/{name}")] CloudBlockBlob myBlob, string name,
             [DurableClient] IDurableOrchestrationClient starter, ILogger log)
         {
             string instanceId = await starter.StartNewAsync("FileProcessing", input:name);
