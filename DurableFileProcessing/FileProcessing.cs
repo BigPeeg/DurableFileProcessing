@@ -1,13 +1,11 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Security.Cryptography;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.Azure.Storage.Blob;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.DurableTask;
 using Microsoft.Extensions.Logging;
+using System;
+using System.IO;
+using System.Security.Cryptography;
+using System.Threading.Tasks;
 
 namespace DurableFileProcessing
 {
@@ -20,49 +18,53 @@ namespace DurableFileProcessing
             ILogger log)
         {
             var transactionId = context.NewGuid().ToString();
-            var filename = context.GetInput<string>();
+            var blobName = context.GetInput<string>();
 
-            string containerSas = BlobUtilities.GetSharedAccessSignature(container, context.CurrentUtcDateTime.AddHours(24));
+            string blobSas = BlobUtilities.GetSharedAccessSignature(container, blobName, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read | SharedAccessBlobPermissions.Write);
 
-            log.LogInformation($"FileProcessing SAS Token: {containerSas}");
+            log.LogInformation($"FileProcessing SAS Token: {blobSas}");
 
-            var hash = await context.CallActivityAsync<string>("FileProcessing_HashGenerator", (containerSas, filename));
-            await context.CallActivityAsync("FileProcessing_StoreHash", (transactionId, hash));
+            var hash = await context.CallActivityAsync<string>("FileProcessing_HashGenerator", blobSas);
 
-            var filetype = await context.CallActivityAsync<string>("FileProcessing_GetFileType", (containerSas, filename));
+            var filetype = await context.CallActivityAsync<string>("FileProcessing_GetFileType", blobSas);
 
             if (filetype == "unmanaged")
             {
-                await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, ProcessingOutcome.Unknown));
+                await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Unknown, RebuiltFileSas = String.Empty}));
             }
             else
             {
-                var rebuildOutcome = await context.CallActivityAsync<ProcessingOutcome>("FileProcessing_RebuildFile", (containerSas, hash, filetype));
+                log.LogInformation($"FileProcessing {filetype}");
+                // Specify the hash value as the rebuilt filename
+                var sourceSas = BlobUtilities.GetSharedAccessSignature(container, blobName, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read);
+                var rebuiltWritesSas = BlobUtilities.GetSharedAccessSignature(container, hash, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read | SharedAccessBlobPermissions.Write);
+                var rebuildOutcome = await context.CallActivityAsync<ProcessingOutcome>("FileProcessing_RebuildFile", (sourceSas, rebuiltWritesSas, filetype));
 
                 if (rebuildOutcome == ProcessingOutcome.Rebuilt)
                 {
-                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, rebuildOutcome));
+                    var rebuiltReadSas = BlobUtilities.GetSharedAccessSignature(container, hash, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read);
+                    log.LogInformation($"FileProcessing Rebuild {rebuiltReadSas}");
+
+                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Rebuilt, RebuiltFileSas = rebuiltReadSas }));
                 }
                 else
                 {
-                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, rebuildOutcome));
+                    log.LogInformation($"FileProcessing Rebuild failure");
+                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Failed, RebuiltFileSas = String.Empty }));
                 }
             }
         }
 
         [FunctionName("FileProcessing_HashGenerator")]
-        public static async Task<string> HashGeneratorAsync([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        public static async Task<string> HashGeneratorAsync([ActivityTrigger] string blobSas, ILogger log)
         {
-            (string containerSas, string filename) = context.GetInput<(string, string)>();
-
-            log.LogInformation($"HashGenerator {containerSas}");
-            var cloudBlobContainer = new CloudBlobContainer(new Uri(containerSas));
-            var blobReference = cloudBlobContainer.GetBlockBlobReference(filename);
+            log.LogInformation($"HashGenerator {blobSas}");
+            var rxBlockBlob = new CloudBlockBlob(new Uri(blobSas));
 
             using (var fileStream = new MemoryStream())
             using (var md5 = MD5.Create())
             {
-                await blobReference.DownloadToStreamAsync(fileStream, CancellationToken.None);
+                await rxBlockBlob.DownloadToStreamAsync(fileStream);
 
                 var hash = md5.ComputeHash(fileStream);
                 var base64String = Convert.ToBase64String(hash);
@@ -89,27 +91,29 @@ namespace DurableFileProcessing
         [FunctionName("FileProcessing_SignalTransactionOutcome")]
         public static void SignalTransactionOutcome([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
-            (string transactionId, ProcessingOutcome outcome) = context.GetInput<(string, ProcessingOutcome)>();
-            log.LogInformation($"SignalTransactionOutcome, transactionId='{transactionId}', outcome='{outcome}'");
+            (string transactionId, RebuildOutcome outcome) = context.GetInput<(string, RebuildOutcome)>();
+            log.LogInformation($"SignalTransactionOutcome, transactionId='{transactionId}', outcome='{outcome.Outcome}'");
         }
         
         [FunctionName("FileProcessing_GetFileType")]
-        public static string GetFileType([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        public static string GetFileType([ActivityTrigger] string blobSas, ILogger log)
         {
-            (string containerSas, string filename) = context.GetInput<(string, string)>();
-            log.LogInformation($"GetFileType, containerSas='{containerSas}', filename='{filename}'");
+            log.LogInformation($"GetFileType, blobSas='{blobSas}'");
             return "unknown";
         }
-
         
         [FunctionName("FileProcessing_RebuildFile")]
-        public static ProcessingOutcome RebuildFile([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        public static async Task<ProcessingOutcome> RebuildFileAsync([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
-            (string rebuiltContainerSas, string filename, string filetype) = context.GetInput<(string, string, string)>();
-            log.LogInformation($"GetFileType, containerSas='{rebuiltContainerSas}', filename='{filename}', filetype='{filetype}'");
-            return ProcessingOutcome.Failed; // When we rebuild the new content will be referenced by supplied SAS
-        }
+            (string receivedSas, string rebuildSas, string receivedFiletype) = context.GetInput<(string, string, string)>();
+            log.LogInformation($"RebuildFileAsync, receivedSas='{receivedSas}', rebuildSas='{rebuildSas}', receivedFiletype='{receivedFiletype}'");
+            // This version of the Activity just copies the incoming file to its rebuilt location
+            var rxBlockBlob = new CloudBlockBlob(new Uri(receivedSas));
+            var rdBlobClient = new CloudBlockBlob(new Uri(rebuildSas));
 
+            await rdBlobClient.StartCopyAsync(rxBlockBlob);
+            return ProcessingOutcome.Rebuilt;
+        }
 
         [FunctionName("FileProcessing_BlobTrigger")]
         public static async Task BlobTrigger(
