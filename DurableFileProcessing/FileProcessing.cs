@@ -37,8 +37,10 @@ namespace DurableFileProcessing
             {
                 log.LogInformation($"FileProcessing {filetype}");
 
-                var (storageAccount, storageAccountKey, rebuildStoreLocaton) = await context.CallActivityAsync<(string, string, string)>("FileProcessing_GetRebuildStoreLocation", null);
-                var rebuildContainer = new CloudBlobContainer(new Uri(rebuildStoreLocaton), new StorageCredentials(storageAccount, storageAccountKey));
+                var configurationSettings = await context.CallActivityAsync<ConfigurationSettings>("FileProcessing_GetConfigurationSettings", null);
+                var rebuildContainer = new CloudBlobContainer(
+                    new Uri(configurationSettings.RebuildStoreLocaton), 
+                    new StorageCredentials(configurationSettings.StorageAccount, configurationSettings.StorageAccountKey));
                 var sourceSas = BlobUtilities.GetSharedAccessSignature(container, blobName, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read);
 
                 // Specify the hash value as the rebuilt filename
@@ -60,13 +62,19 @@ namespace DurableFileProcessing
             }
         }
 
-        [FunctionName("FileProcessing_GetRebuildStoreLocation")]
-        public static Task<(string, string, string)> GetRebuildStoreLocation([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        [FunctionName("FileProcessing_GetConfigurationSettings")]
+        public static Task<ConfigurationSettings> GetConfigurationSettings([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
-            var storageAccount = Environment.GetEnvironmentVariable("StorageAccount", EnvironmentVariableTarget.Process);
-            var storageAccountKey = Environment.GetEnvironmentVariable("StorageAccountKey", EnvironmentVariableTarget.Process);
-            var rebuildStoreLocaton = Environment.GetEnvironmentVariable("RebuildStoreLocaton", EnvironmentVariableTarget.Process);
-            return Task.FromResult((storageAccount, storageAccountKey, rebuildStoreLocaton));
+            var configurationSettings = new ConfigurationSettings
+            {
+                StorageAccount = Environment.GetEnvironmentVariable("StorageAccount", EnvironmentVariableTarget.Process),
+                StorageAccountKey = Environment.GetEnvironmentVariable("StorageAccountKey", EnvironmentVariableTarget.Process),
+                RebuildStoreLocaton = Environment.GetEnvironmentVariable("RebuildStoreLocaton", EnvironmentVariableTarget.Process),
+                ServiceBusConnectionString = Environment.GetEnvironmentVariable("ServiceBusConnectionString", EnvironmentVariableTarget.Process),
+                TransactionOutcomeQueueName = Environment.GetEnvironmentVariable("TransactionOutcomeQueueName", EnvironmentVariableTarget.Process),
+            };
+
+            return Task.FromResult(configurationSettings);
         }
 
         [FunctionName("FileProcessing_HashGenerator")]
@@ -113,7 +121,7 @@ namespace DurableFileProcessing
         public static string GetFileType([ActivityTrigger] string blobSas, ILogger log)
         {
             log.LogInformation($"GetFileType, blobSas='{blobSas}'");
-            return "unknown";
+            return "png";
         }
         
         [FunctionName("FileProcessing_RebuildFile")]
