@@ -74,7 +74,6 @@ namespace DurableFileProcessing
             var configurationSettings = new ConfigurationSettings
             {
                 FileProcessingStorage = Environment.GetEnvironmentVariable("FileProcessingStorage", EnvironmentVariableTarget.Process),
-                ServiceBusConnectionString = Environment.GetEnvironmentVariable("ServiceBusConnectionString", EnvironmentVariableTarget.Process),
                 TransactionOutcomeQueueName = Environment.GetEnvironmentVariable("TransactionOutcomeQueueName", EnvironmentVariableTarget.Process),
             };
 
@@ -119,10 +118,9 @@ namespace DurableFileProcessing
         {
             (ConfigurationSettings configuration, string transactionId, RebuildOutcome outcome) = context.GetInput<(ConfigurationSettings, string, RebuildOutcome)>();
             log.LogInformation($"SignalTransactionOutcome, transactionId='{transactionId}', outcome='{outcome.Outcome}'");
-            CloudStorageAccount account;
-            CloudStorageAccount.TryParse(configuration.ServiceBusConnectionString, out account);
+            var fileProcessingStorage = CloudStorageAccount.Parse(configuration.FileProcessingStorage);
 
-            var queueClient = account.CreateCloudQueueClient();
+            var queueClient = fileProcessingStorage.CreateCloudQueueClient();
             var queue = queueClient.GetQueueReference(configuration.TransactionOutcomeQueueName);
             var messageContentJson = JsonConvert.SerializeObject(new
             {
