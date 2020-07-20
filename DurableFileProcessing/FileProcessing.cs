@@ -5,6 +5,7 @@ using Microsoft.Azure.Storage.Queue;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.DurableTask;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
 using System;
 using System.IO;
 using System.Security.Cryptography;
@@ -123,10 +124,14 @@ namespace DurableFileProcessing
 
             var queueClient = account.CreateCloudQueueClient();
             var queue = queueClient.GetQueueReference(configuration.TransactionOutcomeQueueName);
-            var message = new CloudQueueMessage(transactionId);
+            var messageContentJson = JsonConvert.SerializeObject(new
+            {
+                TransactionId = transactionId,
+                Outcome = outcome.Outcome,
+                RebuildFileSas = outcome.RebuiltFileSas
+            });
 
-            queue.AddMessage(message);
-
+            queue.AddMessage(new CloudQueueMessage(messageContentJson));
         }
         
         [FunctionName("FileProcessing_GetFileType")]
