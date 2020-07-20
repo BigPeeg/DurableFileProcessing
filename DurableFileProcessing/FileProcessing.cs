@@ -1,5 +1,7 @@
+using Microsoft.Azure.Storage;
 using Microsoft.Azure.Storage.Auth;
 using Microsoft.Azure.Storage.Blob;
+using Microsoft.Azure.Storage.Queue;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.DurableTask;
 using Microsoft.Extensions.Logging;
@@ -22,6 +24,7 @@ namespace DurableFileProcessing
             var blobName = context.GetInput<string>();
 
             string blobSas = BlobUtilities.GetSharedAccessSignature(container, blobName, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read | SharedAccessBlobPermissions.Write);
+            var configurationSettings = await context.CallActivityAsync<ConfigurationSettings>("FileProcessing_GetConfigurationSettings", null);
 
             log.LogInformation($"FileProcessing SAS Token: {blobSas}");
 
@@ -31,13 +34,13 @@ namespace DurableFileProcessing
 
             if (filetype == "unmanaged")
             {
-                await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Unknown, RebuiltFileSas = String.Empty}));
+                await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Unknown, RebuiltFileSas = String.Empty}));
             }
             else
             {
                 log.LogInformation($"FileProcessing {filetype}");
 
-                var configurationSettings = await context.CallActivityAsync<ConfigurationSettings>("FileProcessing_GetConfigurationSettings", null);
+                
                 var rebuildContainer = new CloudBlobContainer(
                     new Uri(configurationSettings.RebuildStoreLocaton), 
                     new StorageCredentials(configurationSettings.StorageAccount, configurationSettings.StorageAccountKey));
@@ -52,12 +55,12 @@ namespace DurableFileProcessing
                     var rebuiltReadSas = BlobUtilities.GetSharedAccessSignature(rebuildContainer, hash, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read);
                     log.LogInformation($"FileProcessing Rebuild {rebuiltReadSas}");
 
-                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Rebuilt, RebuiltFileSas = rebuiltReadSas }));
+                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Rebuilt, RebuiltFileSas = rebuiltReadSas }));
                 }
                 else
                 {
                     log.LogInformation($"FileProcessing Rebuild failure");
-                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Failed, RebuiltFileSas = String.Empty }));
+                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Failed, RebuiltFileSas = String.Empty }));
                 }
             }
         }
@@ -113,8 +116,17 @@ namespace DurableFileProcessing
         [FunctionName("FileProcessing_SignalTransactionOutcome")]
         public static void SignalTransactionOutcome([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
-            (string transactionId, RebuildOutcome outcome) = context.GetInput<(string, RebuildOutcome)>();
+            (ConfigurationSettings configuration, string transactionId, RebuildOutcome outcome) = context.GetInput<(ConfigurationSettings, string, RebuildOutcome)>();
             log.LogInformation($"SignalTransactionOutcome, transactionId='{transactionId}', outcome='{outcome.Outcome}'");
+            CloudStorageAccount account;
+            CloudStorageAccount.TryParse(configuration.ServiceBusConnectionString, out account);
+
+            var queueClient = account.CreateCloudQueueClient();
+            var queue = queueClient.GetQueueReference(configuration.TransactionOutcomeQueueName);
+            var message = new CloudQueueMessage(transactionId);
+
+            queue.AddMessage(message);
+
         }
         
         [FunctionName("FileProcessing_GetFileType")]
