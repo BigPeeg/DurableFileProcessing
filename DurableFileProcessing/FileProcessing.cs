@@ -1,9 +1,9 @@
 using Dynamitey.DynamicObjects;
 using Flurl;
 using Flurl.Http;
+using Microsoft.Azure.ServiceBus;
 using Microsoft.Azure.Storage;
 using Microsoft.Azure.Storage.Blob;
-using Microsoft.Azure.Storage.Queue;
 using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.DurableTask;
 using Microsoft.Extensions.Logging;
@@ -24,7 +24,6 @@ namespace DurableFileProcessing
             [Blob("original-store")] CloudBlobContainer container,
             ILogger log)
         {
-            var transactionId = context.NewGuid().ToString();
             var blobName = context.GetInput<string>();
 
             string blobSas = BlobUtilities.GetSharedAccessSignature(container, blobName, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read | SharedAccessBlobPermissions.Write);
@@ -81,6 +80,7 @@ namespace DurableFileProcessing
                 FileProcessingStorage = Environment.GetEnvironmentVariable("FileProcessingStorage", EnvironmentVariableTarget.Process),
                 TransactionOutcomeQueueName = Environment.GetEnvironmentVariable("TransactionOutcomeQueueName", EnvironmentVariableTarget.Process),
                 FiletypeDetectionUrl = Environment.GetEnvironmentVariable("FiletypeDetectionUrl", EnvironmentVariableTarget.Process),
+                ServiceBusConnectionString = Environment.GetEnvironmentVariable("ServiceBusConnectionString", EnvironmentVariableTarget.Process),
                 FiletypeDetectionKey = Environment.GetEnvironmentVariable("FiletypeDetectionKey", EnvironmentVariableTarget.Process),
                 RebuildUrl = Environment.GetEnvironmentVariable("RebuildUrl", EnvironmentVariableTarget.Process),
                 RebuildKey = Environment.GetEnvironmentVariable("RebuildKey", EnvironmentVariableTarget.Process),
@@ -123,22 +123,23 @@ namespace DurableFileProcessing
         }
 
         [FunctionName("FileProcessing_SignalTransactionOutcome")]
-        public static void SignalTransactionOutcome([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        public static async Task SignalTransactionOutcomeAsync([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
             (ConfigurationSettings configuration, string fileId, RebuildOutcome outcome) = context.GetInput<(ConfigurationSettings, string, RebuildOutcome)>();
             log.LogInformation($"SignalTransactionOutcome, fileId='{fileId}', outcome='{outcome.Outcome}'");
-            var fileProcessingStorage = CloudStorageAccount.Parse(configuration.FileProcessingStorage);
+            log.LogInformation($"SignalTransactionOutcome, ServiceBusConnectionString='{configuration.ServiceBusConnectionString}', TransactionOutcomeQueueName='{configuration.TransactionOutcomeQueueName}'");
 
-            var queueClient = fileProcessingStorage.CreateCloudQueueClient();
-            var queue = queueClient.GetQueueReference(configuration.TransactionOutcomeQueueName);
-            var messageContentJson = JsonConvert.SerializeObject(new
+            var queueClient = new QueueClient(configuration.ServiceBusConnectionString, configuration.TransactionOutcomeQueueName);
+            var message = new Message
             {
-                FileId = fileId,
-                Outcome = Enum.GetName(typeof(ProcessingOutcome), outcome.Outcome),
-                RebuildFileSas = outcome.RebuiltFileSas
-            });
+                Label = "transaction-outcome"
+            };
+            message.UserProperties.Add("file-id", fileId);
+            message.UserProperties.Add("file-outcome", Enum.GetName(typeof(ProcessingOutcome), outcome.Outcome));
+            message.UserProperties.Add("file-rebuild-sas", outcome.RebuiltFileSas);
+            await queueClient.SendAsync(message);
 
-            queue.AddMessage(new CloudQueueMessage(messageContentJson));
+            await queueClient.CloseAsync();
         }
         
         [FunctionName("FileProcessing_GetFileType")]
