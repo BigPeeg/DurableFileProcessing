@@ -36,9 +36,13 @@ namespace DurableFileProcessing
 
             var filetype = await context.CallActivityAsync<string>("FileProcessing_GetFileType", (configurationSettings, blobSas));
 
-            if (filetype == "unmanaged")
+            if (filetype == "error")
             {
-                await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Unknown, RebuiltFileSas = String.Empty}));
+                await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, blobName, new RebuildOutcome { Outcome = ProcessingOutcome.Error, RebuiltFileSas = String.Empty }));
+            }
+            else if (filetype == "unmanaged")
+            {
+                await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, blobName, new RebuildOutcome { Outcome = ProcessingOutcome.Unknown, RebuiltFileSas = String.Empty }));
             }
             else
             {
@@ -59,12 +63,12 @@ namespace DurableFileProcessing
                     var rebuiltReadSas = BlobUtilities.GetSharedAccessSignature(rebuildContainer, hash, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Read);
                     log.LogInformation($"FileProcessing Rebuild {rebuiltReadSas}");
 
-                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Rebuilt, RebuiltFileSas = rebuiltReadSas }));
+                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, blobName, new RebuildOutcome { Outcome = ProcessingOutcome.Rebuilt, RebuiltFileSas = rebuiltReadSas }));
                 }
                 else
                 {
                     log.LogInformation($"FileProcessing Rebuild failure");
-                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, transactionId, new RebuildOutcome { Outcome = ProcessingOutcome.Failed, RebuiltFileSas = String.Empty }));
+                    await context.CallActivityAsync("FileProcessing_SignalTransactionOutcome", (configurationSettings, blobName, new RebuildOutcome { Outcome = ProcessingOutcome.Failed, RebuiltFileSas = String.Empty }));
                 }
             }
         }
@@ -121,16 +125,16 @@ namespace DurableFileProcessing
         [FunctionName("FileProcessing_SignalTransactionOutcome")]
         public static void SignalTransactionOutcome([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
-            (ConfigurationSettings configuration, string transactionId, RebuildOutcome outcome) = context.GetInput<(ConfigurationSettings, string, RebuildOutcome)>();
-            log.LogInformation($"SignalTransactionOutcome, transactionId='{transactionId}', outcome='{outcome.Outcome}'");
+            (ConfigurationSettings configuration, string fileId, RebuildOutcome outcome) = context.GetInput<(ConfigurationSettings, string, RebuildOutcome)>();
+            log.LogInformation($"SignalTransactionOutcome, fileId='{fileId}', outcome='{outcome.Outcome}'");
             var fileProcessingStorage = CloudStorageAccount.Parse(configuration.FileProcessingStorage);
 
             var queueClient = fileProcessingStorage.CreateCloudQueueClient();
             var queue = queueClient.GetQueueReference(configuration.TransactionOutcomeQueueName);
             var messageContentJson = JsonConvert.SerializeObject(new
             {
-                TransactionId = transactionId,
-                Outcome = outcome.Outcome,
+                FileId = fileId,
+                Outcome = Enum.GetName(typeof(ProcessingOutcome), outcome.Outcome),
                 RebuildFileSas = outcome.RebuiltFileSas
             });
 
@@ -146,15 +150,23 @@ namespace DurableFileProcessing
 
             log.LogInformation($"GetFileType, filetypeDetectionUrl='{filetypeDetectionUrl}'");
             log.LogInformation($"GetFileType, blobSas='{blobSas}'");
-            var response = await filetypeDetectionUrl
-                .WithHeader("x-api-key", filetypeDetectionKey)
-                .PostJsonAsync(new
-                {
-                    SasUrl = blobSas
-                })
-                .ReceiveJson();
+            try
+            {
+                var response = await filetypeDetectionUrl
+                                        .WithHeader("x-api-key", filetypeDetectionKey)
+                                        .PostJsonAsync(new
+                                            {
+                                                SasUrl = blobSas
+                                            })
+                                        .ReceiveJson();
 
-            return response.FileTypeName;
+                return response.FileTypeName;
+            }
+            catch (Exception ex)
+            {
+                log.LogError(ex, $"Unable to detect filetype.");
+                return "Error";
+            }
         }
         
         [FunctionName("FileProcessing_RebuildFile")]
@@ -164,21 +176,29 @@ namespace DurableFileProcessing
             log.LogInformation($"RebuildFileAsync, receivedSas='{receivedSas}', rebuildSas='{rebuildSas}', receivedFiletype='{receivedFiletype}'");
             var rebuildUrl = configuration.RebuildUrl;
             var rebuildKey = configuration.RebuildKey;
-            var response = await rebuildUrl
-                .SetQueryParam("code", rebuildKey, isEncoded:true)
-                .PostJsonAsync(new
-                {
-                    InputGetUrl = receivedSas,
-                    OutputPutUrl = rebuildSas,
-                    OutputPutUrlRequestHeaders = new Dictionary
-                    {
-                         { "x-ms-blob-type", "BlockBlob" }
-                    }
-                })
-                .ReceiveString();
-            log.LogInformation($"GetFileType, response='{response}'");
+            try
+            {
+                var response = await rebuildUrl
+                                    .SetQueryParam("code", rebuildKey, isEncoded: true)
+                                    .PostJsonAsync(new
+                                    {
+                                        InputGetUrl = receivedSas,
+                                        OutputPutUrl = rebuildSas,
+                                        OutputPutUrlRequestHeaders = new Dictionary
+                                        {
+                                                 { "x-ms-blob-type", "BlockBlob" }
+                                        }
+                                    })
+                                    .ReceiveString();
+                                        log.LogInformation($"GetFileType, response='{response}'");
 
-            return ProcessingOutcome.Rebuilt;
+                return ProcessingOutcome.Rebuilt;
+            }
+            catch (Exception ex)
+            {
+                log.LogError(ex, $"Unable to Rebuild file.");
+                return ProcessingOutcome.Error;
+            }
         }
 
         [FunctionName("FileProcessing_BlobTrigger")]
