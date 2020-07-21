@@ -1,6 +1,6 @@
 using Flurl;
+using Flurl.Http;
 using Microsoft.Azure.Storage;
-using Microsoft.Azure.Storage.Auth;
 using Microsoft.Azure.Storage.Blob;
 using Microsoft.Azure.Storage.Queue;
 using Microsoft.Azure.WebJobs;
@@ -33,7 +33,7 @@ namespace DurableFileProcessing
 
             var hash = await context.CallActivityAsync<string>("FileProcessing_HashGenerator", blobSas);
 
-            var filetype = await context.CallActivityAsync<string>("FileProcessing_GetFileType", blobSas);
+            var filetype = await context.CallActivityAsync<string>("FileProcessing_GetFileType", (configurationSettings, blobSas));
 
             if (filetype == "unmanaged")
             {
@@ -75,6 +75,8 @@ namespace DurableFileProcessing
             {
                 FileProcessingStorage = Environment.GetEnvironmentVariable("FileProcessingStorage", EnvironmentVariableTarget.Process),
                 TransactionOutcomeQueueName = Environment.GetEnvironmentVariable("TransactionOutcomeQueueName", EnvironmentVariableTarget.Process),
+                FiletypeDetectionUrl = Environment.GetEnvironmentVariable("FiletypeDetectionUrl", EnvironmentVariableTarget.Process),
+                FiletypeDetectionKey = Environment.GetEnvironmentVariable("FiletypeDetectionKey", EnvironmentVariableTarget.Process),
             };
 
             return Task.FromResult(configurationSettings);
@@ -133,10 +135,23 @@ namespace DurableFileProcessing
         }
         
         [FunctionName("FileProcessing_GetFileType")]
-        public static string GetFileType([ActivityTrigger] string blobSas, ILogger log)
+        public static async Task<string> GetFileTypeAsync([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
+            (ConfigurationSettings configuration, string blobSas) = context.GetInput<(ConfigurationSettings, string)>();
+            var filetypeDetectionUrl = configuration.FiletypeDetectionUrl;
+            var filetypeDetectionKey = configuration.FiletypeDetectionKey;
+
+            log.LogInformation($"GetFileType, filetypeDetectionUrl='{filetypeDetectionUrl}'");
             log.LogInformation($"GetFileType, blobSas='{blobSas}'");
-            return "png";
+            var response = await filetypeDetectionUrl
+                .WithHeader("x-api-key", filetypeDetectionKey)
+                .PostJsonAsync(new
+                {
+                    SasUrl = blobSas
+                })
+                .ReceiveJson();
+
+            return response.FileTypeName;
         }
         
         [FunctionName("FileProcessing_RebuildFile")]
