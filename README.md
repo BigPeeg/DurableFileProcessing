@@ -13,6 +13,7 @@ All workflow storage is persisted in `FileProcessingStorage`
 The following configuration is required in `local.settings.json` for the 'DurableFileProcessing' project folder.
 `AzureWebJobsStorage` : The connection string of the Azure Storage Account being used by the framework. For local development use "UseDevelopmentStorage=true". When deployed to Azure, this may use the same storage account as 'FileProcessingStorage'.
 `FileProcessingStorage` : The connection string of the Azure Storage Account being used by the workflow logic. In order that the Fileype Detection and Rebuild APIs can access the necessary stores, this Storage Account must be provided within Microsoft Azure.
+`ServiceBusConnectionString` : The connection string of the Service Bus Namespace in which the `TransactionOutcomeQueueName` exists. This must have at least a `Send` claim on the namespace.
 `TransactionOutcomeQueueName`  : The name of the Storage Queue within `FileProcessingStorage` used to return the processing results.
 `FiletypeDetectionUrl` & `FiletypeDetectionKey` : The URL used to access the Filetype Detection API, and its associated key.
 'RebuildUrl' & 'RebuildKey' : The URL used to access the Rebuild API, and its associated key.
