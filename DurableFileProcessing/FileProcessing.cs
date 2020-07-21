@@ -1,3 +1,4 @@
+using Dynamitey.DynamicObjects;
 using Flurl;
 using Flurl.Http;
 using Microsoft.Azure.Storage;
@@ -51,7 +52,7 @@ namespace DurableFileProcessing
 
                 // Specify the hash value as the rebuilt filename
                 var rebuiltWritesSas = BlobUtilities.GetSharedAccessSignature(rebuildContainer, hash, context.CurrentUtcDateTime.AddHours(24), SharedAccessBlobPermissions.Write);
-                var rebuildOutcome = await context.CallActivityAsync<ProcessingOutcome>("FileProcessing_RebuildFile", (sourceSas, rebuiltWritesSas, filetype));
+                var rebuildOutcome = await context.CallActivityAsync<ProcessingOutcome>("FileProcessing_RebuildFile", (configurationSettings, sourceSas, rebuiltWritesSas, filetype));
 
                 if (rebuildOutcome == ProcessingOutcome.Rebuilt)
                 {
@@ -69,7 +70,7 @@ namespace DurableFileProcessing
         }
 
         [FunctionName("FileProcessing_GetConfigurationSettings")]
-        public static Task<ConfigurationSettings> GetConfigurationSettings([ActivityTrigger] IDurableActivityContext context, ILogger log)
+        public static Task<ConfigurationSettings> GetConfigurationSettings([ActivityTrigger] IDurableActivityContext context)
         {
             var configurationSettings = new ConfigurationSettings
             {
@@ -77,6 +78,8 @@ namespace DurableFileProcessing
                 TransactionOutcomeQueueName = Environment.GetEnvironmentVariable("TransactionOutcomeQueueName", EnvironmentVariableTarget.Process),
                 FiletypeDetectionUrl = Environment.GetEnvironmentVariable("FiletypeDetectionUrl", EnvironmentVariableTarget.Process),
                 FiletypeDetectionKey = Environment.GetEnvironmentVariable("FiletypeDetectionKey", EnvironmentVariableTarget.Process),
+                RebuildUrl = Environment.GetEnvironmentVariable("RebuildUrl", EnvironmentVariableTarget.Process),
+                RebuildKey = Environment.GetEnvironmentVariable("RebuildKey", EnvironmentVariableTarget.Process),
             };
 
             return Task.FromResult(configurationSettings);
@@ -157,14 +160,23 @@ namespace DurableFileProcessing
         [FunctionName("FileProcessing_RebuildFile")]
         public static async Task<ProcessingOutcome> RebuildFileAsync([ActivityTrigger] IDurableActivityContext context, ILogger log)
         {
-            (string receivedSas, string rebuildSas, string receivedFiletype) = context.GetInput<(string, string, string)>();
+            (ConfigurationSettings configuration, string receivedSas, string rebuildSas, string receivedFiletype) = context.GetInput<(ConfigurationSettings, string, string, string)>();
             log.LogInformation($"RebuildFileAsync, receivedSas='{receivedSas}', rebuildSas='{rebuildSas}', receivedFiletype='{receivedFiletype}'");
-            // This version of the Activity just copies the incoming file to its rebuilt location
-            var rxBlockBlob = new CloudBlockBlob(new Uri(receivedSas));
-            var rdBlobClient = new CloudBlockBlob(new Uri(rebuildSas));
-
-            var RebuildFileAsync = await rdBlobClient.StartCopyAsync(rxBlockBlob);
-            log.LogInformation($"RebuildFileAsync: '{RebuildFileAsync}");
+            var rebuildUrl = configuration.RebuildUrl;
+            var rebuildKey = configuration.RebuildKey;
+            var response = await rebuildUrl
+                .SetQueryParam("code", rebuildKey, isEncoded:true)
+                .PostJsonAsync(new
+                {
+                    InputGetUrl = receivedSas,
+                    OutputPutUrl = rebuildSas,
+                    OutputPutUrlRequestHeaders = new Dictionary
+                    {
+                         { "x-ms-blob-type", "BlockBlob" }
+                    }
+                })
+                .ReceiveString();
+            log.LogInformation($"GetFileType, response='{response}'");
 
             return ProcessingOutcome.Rebuilt;
         }
